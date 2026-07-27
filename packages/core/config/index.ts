@@ -16,6 +16,11 @@ interface ConfigState {
   // must be hidden. Defaults to false so unknown / older servers behave like
   // the managed-cloud case.
   workspaceCreationDisabled: boolean;
+  // Self-host-only gate for the Git provider integration (Forgejo / Gitea /
+  // GitLab). When false the whole Settings → Integrations "Git providers"
+  // section is hidden. Defaults to false so unknown / older servers and the
+  // managed cloud (which omits the field) keep it hidden.
+  vcsIntegrationAvailable: boolean;
   featureFlags: Record<string, boolean>;
   // The running API build version, surfaced in the Help popover so
   // self-hosted operators can confirm what's deployed. Empty for dev builds
@@ -27,6 +32,7 @@ interface ConfigState {
     googleClientId?: string;
     oidcProviderName?: string;
     workspaceCreationDisabled?: boolean;
+    vcsIntegrationAvailable?: boolean;
   }) => void;
   setDaemonConfig: (config: {
     daemonServerUrl?: string;
@@ -45,11 +51,24 @@ export const configStore = createStore<ConfigState>((set) => ({
   daemonServerUrl: "",
   daemonAppUrl: "",
   workspaceCreationDisabled: false,
+  vcsIntegrationAvailable: false,
   featureFlags: {},
   serverVersion: "",
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
-  setAuthConfig: ({ allowSignup, googleClientId = "", oidcProviderName = "", workspaceCreationDisabled = false }) =>
-    set({ allowSignup, googleClientId, oidcProviderName, workspaceCreationDisabled }),
+  setAuthConfig: ({
+    allowSignup,
+    googleClientId = "",
+    oidcProviderName = "",
+    workspaceCreationDisabled = false,
+    vcsIntegrationAvailable = false,
+  }) =>
+    set({
+      allowSignup,
+      googleClientId,
+      oidcProviderName,
+      workspaceCreationDisabled,
+      vcsIntegrationAvailable,
+    }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
   setFeatureFlags: (flags = {}) => set({ featureFlags: { ...flags } }),
