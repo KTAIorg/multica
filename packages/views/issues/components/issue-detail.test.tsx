@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef, useState, useImperativeHandle } from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Issue, Label, TimelineEntry } from "@multica/core/types";
@@ -19,6 +19,10 @@ const mockViewport = vi.hoisted(() => ({ isMobile: false }));
 // Counts MockContentEditor mounts. This pins the description to exactly one
 // eager editor per issue and catches stale editor reuse across issue switches.
 const contentEditorMounts = vi.hoisted(() => ({ count: 0 }));
+// Stable empty-attachments reference: the real store returns a shared constant
+// so the `useCommentDraftStore(s => s.getAttachments(key))` selector keeps a
+// stable identity. A fresh `[]` per call would loop useSyncExternalStore.
+const emptyDraftAttachments = vi.hoisted(() => [] as unknown[]);
 
 vi.mock("@multica/ui/hooks/use-mobile", () => ({
   useIsMobile: () => mockViewport.isMobile,
@@ -130,6 +134,11 @@ vi.mock("../../editor", async () => ({
   ...(await vi.importActual<typeof import("../../editor/use-upload-gate")>(
     "../../editor/use-upload-gate",
   )),
+  // Real await-then-render submit hook (pure React) so comment/reply/edit
+  // composers run the production submit path.
+  ...(await vi.importActual<typeof import("../../editor/use-composer-submit")>(
+    "../../editor/use-composer-submit",
+  )),
   useEditorUpload: () => ({
     uploadWithToast: vi.fn(),
     upload: vi.fn(),
@@ -181,6 +190,15 @@ vi.mock("../../editor", async () => ({
       clearContent: () => { valueRef.current = ""; setEditorValue(""); },
       focus: () => {},
       focusAtCoords: () => {},
+      // The top-level composer blurs after a posted comment (afterAccepted).
+      blur: () => {},
+      // Read by the submit-time upload gate; no uploads are exercised here.
+      hasActiveUploads: () => false,
+      // Placeholder rebuild contract: the real handle draws a card for an
+      // upload the document is not showing and reports whether it landed.
+      // Mocks track ids only — no document to draw into.
+      insertUploadPlaceholder: () => true,
+      settleUploadPlaceholder: () => false,
       uploadFile: () => {},
     }));
     return (
@@ -254,6 +272,7 @@ const mockApiObj = vi.hoisted(() => ({
   listIssueSubscribers: vi.fn().mockResolvedValue([]),
   subscribeToIssue: vi.fn().mockResolvedValue(undefined),
   unsubscribeFromIssue: vi.fn().mockResolvedValue(undefined),
+  unsubscribeFromIssueSubtree: vi.fn().mockResolvedValue(undefined),
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
   rerunIssue: vi.fn(),
@@ -261,6 +280,8 @@ const mockApiObj = vi.hoisted(() => ({
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
   getChildIssueProgress: vi.fn().mockResolvedValue({ progress: [] }),
   getAgentTaskSnapshot: vi.fn().mockResolvedValue([]),
+  // The sub-issues header chip reads this narrowed to the parent issue.
+  getWorkspaceWorkingAgents: vi.fn().mockResolvedValue([]),
   listProperties: vi.fn().mockResolvedValue({ properties: [], total: 0 }),
   listIssues: vi.fn().mockResolvedValue({ issues: [], total: 0 }),
   uploadFile: vi.fn(),
@@ -296,6 +317,7 @@ vi.mock("@multica/core/issues/config", () => ({
     cancelled: { label: "Cancelled", iconColor: "text-muted-foreground", hoverBg: "hover:bg-accent" },
   },
   PRIORITY_ORDER: ["urgent", "high", "medium", "low", "none"],
+  PRIORITY_DISPLAY_ORDER: ["none", "urgent", "high", "medium", "low"],
   PRIORITY_CONFIG: {
     urgent: { label: "Urgent", bars: 4, color: "text-destructive", badgeBg: "bg-destructive/10", badgeText: "text-destructive" },
     high: { label: "High", bars: 3, color: "text-warning", badgeBg: "bg-warning/10", badgeText: "text-warning" },
@@ -344,18 +366,32 @@ vi.mock("@multica/core/issues/stores", async () => ({
   useCommentDraftStore: Object.assign(
     (selector?: any) => {
       const state = {
-        drafts: {} as Record<string, { content: string; updatedAt: number }>,
+        drafts: {} as Record<string, { content: string; attachments: unknown[]; updatedAt: number }>,
         getDraft: () => undefined,
+        getAttachments: () => emptyDraftAttachments,
+        getUploads: () => emptyDraftAttachments,
         setDraft: () => {},
+        setAttachments: () => {},
+        addUpload: () => {},
+        settleUpload: () => {},
+        failUpload: () => {},
+        removeUpload: () => {},
         clearDraft: () => {},
       };
       return selector ? selector(state) : state;
     },
     {
       getState: () => ({
-        drafts: {} as Record<string, { content: string; updatedAt: number }>,
+        drafts: {} as Record<string, { content: string; attachments: unknown[]; updatedAt: number }>,
         getDraft: () => undefined,
+        getAttachments: () => emptyDraftAttachments,
+        getUploads: () => emptyDraftAttachments,
         setDraft: () => {},
+        setAttachments: () => {},
+        addUpload: () => {},
+        settleUpload: () => {},
+        failUpload: () => {},
+        removeUpload: () => {},
         clearDraft: () => {},
       }),
     },
@@ -599,6 +635,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listChildIssues.mockResolvedValue({ issues: [] });
     mockApiObj.getChildIssueProgress.mockResolvedValue({ progress: [] });
     mockApiObj.getAgentTaskSnapshot.mockResolvedValue([]);
+    mockApiObj.getWorkspaceWorkingAgents.mockResolvedValue([]);
     mockApiObj.listProperties.mockResolvedValue({ properties: [], total: 0 });
     mockApiObj.listIssues.mockResolvedValue({ issues: [], total: 0 });
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
@@ -884,6 +921,38 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Created by")).toBeInTheDocument();
     expect(screen.getByText("Created")).toBeInTheDocument();
     expect(screen.getByText("Updated")).toBeInTheDocument();
+  });
+
+  // Details is creator + immutable timestamps, so it ranks below the
+  // execution log, which is what people actually open the sidebar for.
+  it("orders the Details section after the execution log", async () => {
+    mockApiObj.listTasksByIssue.mockResolvedValue([
+      {
+        id: "task-past",
+        agent_id: "agent-1",
+        runtime_id: "runtime-1",
+        issue_id: "issue-1",
+        status: "completed",
+        priority: 0,
+        dispatched_at: null,
+        started_at: "2026-06-08T08:00:00Z",
+        completed_at: "2026-06-08T08:05:00Z",
+        result: null,
+        error: null,
+        created_at: "2026-06-08T08:00:00Z",
+        trigger_summary: "Started from comment",
+      },
+    ]);
+
+    renderIssueDetail();
+
+    const executionLog = await screen.findByText("Execution log");
+    const details = screen.getByText("Details");
+
+    // DOCUMENT_POSITION_FOLLOWING: Details comes after the execution log.
+    expect(
+      executionLog.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("shows 'not found' message when issue does not exist", async () => {
@@ -1402,6 +1471,37 @@ describe("IssueDetail (shared)", () => {
     });
   });
 
+  it("marks a reply-resolved thread as resolved on the quick-jump rail", async () => {
+    // A resolution on a REPLY leaves the thread expanded, so it flattens to a
+    // plain `comment` item, not a `resolved-bar`. The rail must still read it
+    // as resolved — proof the flag comes from deriveThreadResolution and not
+    // from the fold state.
+    mockApiObj.listTimeline.mockResolvedValue([
+      ...mockTimeline,
+      {
+        type: "comment",
+        id: "reply-1",
+        actor_type: "member",
+        actor_id: "user-1",
+        content: "That fixed it",
+        parent_id: "comment-1",
+        created_at: "2026-01-18T00:00:00Z",
+        updated_at: "2026-01-18T00:00:00Z",
+        comment_type: "comment",
+        resolved_at: "2026-01-19T00:00:00Z",
+      } as TimelineEntry,
+    ]);
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Started working on this (resolved)" }),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "I can help with this" })).toBeInTheDocument();
+  });
+
   it("sends empty description when editor is cleared", async () => {
     renderIssueDetail();
 
@@ -1576,6 +1676,75 @@ describe("IssueDetail (shared)", () => {
       const due = screen.getByText("Jan 1");
       expect(due.closest("span")?.className).not.toContain("text-destructive");
       expect(due.closest("span")?.className).toContain("text-muted-foreground");
+    });
+  });
+
+  // Deliberately drives the real Base UI DropdownMenu rather than a stub: the
+  // bug these tests pin (MUL-5710) was a handler wired to `onSelect`, which
+  // typechecks because Menu.Item's props extend the whole div attribute set,
+  // then lands on the DOM as the native text-selection event and never fires.
+  // Only the real menu reproduces that; any hand-rolled mock hides it.
+  describe("unsubscribe menu", () => {
+    const subscribedAsMember = [
+      {
+        issue_id: "issue-1",
+        user_type: "member" as const,
+        user_id: "user-1",
+        reason: "manual" as const,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+
+    beforeEach(() => {
+      mockApiObj.listIssueSubscribers.mockResolvedValue(subscribedAsMember);
+    });
+
+    // Base UI portals the popup onto document.body; RTL unmounts it, but wipe
+    // the body too so a leftover portal can't duplicate menu item names.
+    afterEach(() => {
+      document.body.innerHTML = "";
+    });
+
+    async function openUnsubscribeMenu() {
+      renderIssueDetail();
+      fireEvent.click(await screen.findByText("Unsubscribe"));
+      return screen.findByRole("menu");
+    }
+
+    it("unsubscribes the current member when the single-issue item is clicked", async () => {
+      await openUnsubscribeMenu();
+
+      fireEvent.click(
+        screen.getByRole("menuitem", { name: "Unsubscribe from this issue" }),
+      );
+
+      await waitFor(() =>
+        expect(mockApiObj.unsubscribeFromIssue).toHaveBeenCalledWith(
+          "issue-1",
+          "user-1",
+          "member",
+        ),
+      );
+      expect(mockApiObj.unsubscribeFromIssueSubtree).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribes from the whole subtree when the subtree item is clicked", async () => {
+      await openUnsubscribeMenu();
+
+      fireEvent.click(
+        screen.getByRole("menuitem", {
+          name: "Unsubscribe from this issue and its sub-issues",
+        }),
+      );
+
+      await waitFor(() =>
+        expect(mockApiObj.unsubscribeFromIssueSubtree).toHaveBeenCalledWith(
+          "issue-1",
+          "user-1",
+          "member",
+        ),
+      );
+      expect(mockApiObj.unsubscribeFromIssue).not.toHaveBeenCalled();
     });
   });
 });
