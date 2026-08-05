@@ -141,6 +141,9 @@ backend:
     oidcAllowedGroups: ""
     oidcGroupsClaim: groups
     oidcRequireVerifiedEmail: true
+    # Comma-separated issuers allowed to JIT-provision users without an email
+    # claim (KT: https://auth.ktyun.cc for Telegram via kt-identity).
+    oidcTrustedIssuersWithoutEmail: ""
     s3Bucket: ""
     s3Region: us-west-2
     cloudfrontDomain: ""

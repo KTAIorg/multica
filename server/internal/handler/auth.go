@@ -169,14 +169,27 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email string) (user db.U
 }
 
 func (h *Handler) findOrCreateUserWithQueries(ctx context.Context, queries *db.Queries, email string) (user db.User, isNew bool, err error) {
+	return h.findOrCreateUserWithQueriesOpts(ctx, queries, email, false)
+}
+
+// findOrCreateUserWithQueriesForced skips signup allowlists. Used only for
+// trusted OIDC issuers (kt-identity) where login itself is the authorization
+// gate for account creation; Multica workspace membership remains separate.
+func (h *Handler) findOrCreateUserWithQueriesForced(ctx context.Context, queries *db.Queries, email string) (user db.User, isNew bool, err error) {
+	return h.findOrCreateUserWithQueriesOpts(ctx, queries, email, true)
+}
+
+func (h *Handler) findOrCreateUserWithQueriesOpts(ctx context.Context, queries *db.Queries, email string, forceCreate bool) (user db.User, isNew bool, err error) {
 	user, err = queries.GetUserByEmail(ctx, email)
 	isNew = isNotFound(err)
 	if err != nil && !isNew {
 		return db.User{}, false, err
 	}
 
-	if err := h.checkSignupAllowed(email, isNew); err != nil {
-		return db.User{}, false, err
+	if !forceCreate {
+		if err := h.checkSignupAllowed(email, isNew); err != nil {
+			return db.User{}, false, err
+		}
 	}
 
 	if !isNew {

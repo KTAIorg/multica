@@ -28,6 +28,7 @@ data:
   OIDC_ALLOWED_GROUPS: {{ .Values.backend.config.oidcAllowedGroups | quote }}
   OIDC_GROUPS_CLAIM: {{ .Values.backend.config.oidcGroupsClaim | quote }}
   OIDC_REQUIRE_VERIFIED_EMAIL: {{ .Values.backend.config.oidcRequireVerifiedEmail | quote }}
+  OIDC_TRUSTED_ISSUERS_WITHOUT_EMAIL: {{ .Values.backend.config.oidcTrustedIssuersWithoutEmail | quote }}
   S3_BUCKET: {{ .Values.backend.config.s3Bucket | quote }}
   S3_REGION: {{ .Values.backend.config.s3Region | quote }}
   CLOUDFRONT_DOMAIN: {{ .Values.backend.config.cloudfrontDomain | quote }}

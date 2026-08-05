@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -26,15 +28,16 @@ const (
 )
 
 type oidcRuntimeConfig struct {
-	IssuerURL            string
-	ClientID             string
-	ClientSecret         string
-	RedirectURI          string
-	ProviderName         string
-	Scopes               []string
-	AllowedGroups        []string
-	GroupsClaim          string
-	RequireVerifiedEmail bool
+	IssuerURL                   string
+	ClientID                    string
+	ClientSecret                string
+	RedirectURI                 string
+	ProviderName                string
+	Scopes                      []string
+	AllowedGroups               []string
+	GroupsClaim                 string
+	RequireVerifiedEmail        bool
+	TrustedIssuersWithoutEmail  []string
 }
 
 type oidcStartRequest struct {
@@ -71,14 +74,15 @@ var oidcProviders sync.Map
 
 func loadOIDCRuntimeConfig() (oidcRuntimeConfig, error) {
 	cfg := oidcRuntimeConfig{
-		IssuerURL:            strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")),
-		ClientID:             strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
-		ClientSecret:         strings.TrimSpace(os.Getenv("OIDC_CLIENT_SECRET")),
-		RedirectURI:          strings.TrimSpace(os.Getenv("OIDC_REDIRECT_URI")),
-		ProviderName:         strings.TrimSpace(os.Getenv("OIDC_PROVIDER_NAME")),
-		AllowedGroups:        splitCommaSeparated(os.Getenv("OIDC_ALLOWED_GROUPS")),
-		GroupsClaim:          strings.TrimSpace(os.Getenv("OIDC_GROUPS_CLAIM")),
-		RequireVerifiedEmail: os.Getenv("OIDC_REQUIRE_VERIFIED_EMAIL") != "false",
+		IssuerURL:                  strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")),
+		ClientID:                   strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
+		ClientSecret:               strings.TrimSpace(os.Getenv("OIDC_CLIENT_SECRET")),
+		RedirectURI:                strings.TrimSpace(os.Getenv("OIDC_REDIRECT_URI")),
+		ProviderName:               strings.TrimSpace(os.Getenv("OIDC_PROVIDER_NAME")),
+		AllowedGroups:              splitCommaSeparated(os.Getenv("OIDC_ALLOWED_GROUPS")),
+		GroupsClaim:                strings.TrimSpace(os.Getenv("OIDC_GROUPS_CLAIM")),
+		RequireVerifiedEmail:       os.Getenv("OIDC_REQUIRE_VERIFIED_EMAIL") != "false",
+		TrustedIssuersWithoutEmail: splitCommaSeparated(os.Getenv("OIDC_TRUSTED_ISSUERS_WITHOUT_EMAIL")),
 	}
 	if cfg.IssuerURL == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURI == "" {
 		return oidcRuntimeConfig{}, errors.New("OIDC is not configured")
@@ -294,11 +298,19 @@ func (h *Handler) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	claims.Email = strings.ToLower(strings.TrimSpace(claims.Email))
+	trustedIssuer := oidcIssuerTrustedWithoutEmail(idToken.Issuer, cfg.TrustedIssuersWithoutEmail)
 	if claims.Email == "" {
-		writeError(w, http.StatusBadRequest, "OIDC account has no email")
-		return
+		if !trustedIssuer {
+			writeError(w, http.StatusBadRequest, "OIDC account has no email")
+			return
+		}
+		// KT: Telegram / kt-identity users often lack email claims. Keep a
+		// stable placeholder so Multica's NOT NULL email column stays happy
+		// while identity remains (issuer, subject).
+		claims.Email = syntheticOIDCEmail(idToken.Issuer, idToken.Subject)
+		claims.EmailVerified = true
 	}
-	if cfg.RequireVerifiedEmail && !claims.EmailVerified {
+	if cfg.RequireVerifiedEmail && !claims.EmailVerified && !trustedIssuer {
 		writeError(w, http.StatusForbidden, "OIDC account email is not verified")
 		return
 	}
@@ -306,7 +318,7 @@ func (h *Handler) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "OIDC account is not in an allowed group")
 		return
 	}
-	user, isNew, err := h.resolveOIDCUser(ctx, idToken.Issuer, idToken.Subject, claims.Email)
+	user, isNew, err := h.resolveOIDCUser(ctx, idToken.Issuer, idToken.Subject, claims.Email, trustedIssuer)
 	if err != nil {
 		var signupErr SignupError
 		if errors.As(err, &signupErr) {
@@ -324,7 +336,7 @@ func (h *Handler) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, oidcLoginResponse{LoginResponse: login, AppState: flow.AppState})
 }
 
-func (h *Handler) resolveOIDCUser(ctx context.Context, issuer, subject, email string) (db.User, bool, error) {
+func (h *Handler) resolveOIDCUser(ctx context.Context, issuer, subject, email string, trustedIssuer bool) (db.User, bool, error) {
 	if h.TxStarter == nil {
 		return db.User{}, false, errors.New("OIDC identity storage is unavailable")
 	}
@@ -355,19 +367,45 @@ func (h *Handler) resolveOIDCUser(ctx context.Context, issuer, subject, email st
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "oidc-email\x00"+email); err != nil {
 		return db.User{}, false, err
 	}
-	user, isNew, err := h.findOrCreateUserWithQueries(ctx, queries, email)
+	var (
+		created db.User
+		isNew   bool
+	)
+	if trustedIssuer {
+		// Login via a trusted IdP is not "open signup"; JIT-provision the
+		// Multica user so Telegram/kt-identity accounts are not blocked by
+		// ALLOW_SIGNUP=false.
+		created, isNew, err = h.findOrCreateUserWithQueriesForced(ctx, queries, email)
+	} else {
+		created, isNew, err = h.findOrCreateUserWithQueries(ctx, queries, email)
+	}
 	if err != nil {
 		return db.User{}, false, err
 	}
 	if err := queries.CreateOIDCIdentity(ctx, db.CreateOIDCIdentityParams{
-		Issuer: issuer, Subject: subject, UserID: user.ID, Email: email,
+		Issuer: issuer, Subject: subject, UserID: created.ID, Email: email,
 	}); err != nil {
 		return db.User{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.User{}, false, err
 	}
-	return user, isNew, nil
+	return created, isNew, nil
+}
+
+func oidcIssuerTrustedWithoutEmail(issuer string, trusted []string) bool {
+	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	for _, candidate := range trusted {
+		if strings.TrimRight(strings.TrimSpace(candidate), "/") == issuer {
+			return true
+		}
+	}
+	return false
+}
+
+func syntheticOIDCEmail(issuer, subject string) string {
+	sum := sha256.Sum256([]byte(strings.TrimRight(strings.TrimSpace(issuer), "/") + "\x00" + subject))
+	return "oidc-" + hex.EncodeToString(sum[:8]) + "@oidc-connect.invalid"
 }
 
 func oidcConfigForPublicResponse() (string, bool) {
