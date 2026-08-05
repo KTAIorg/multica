@@ -346,7 +346,8 @@ func (h *Handler) resolveOIDCUser(ctx context.Context, issuer, subject, email st
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	identityKey := issuer + "\x00" + subject
+	identityKey := issuer + "\x1f" + subject
+	// Use unit separator (not NUL): Postgres UTF8 rejects 0x00 in text params.
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", identityKey); err != nil {
 		return db.User{}, false, err
 	}
@@ -364,7 +365,7 @@ func (h *Handler) resolveOIDCUser(ctx context.Context, issuer, subject, email st
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return db.User{}, false, err
 	}
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "oidc-email\x00"+email); err != nil {
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "oidc-email\x1f"+email); err != nil {
 		return db.User{}, false, err
 	}
 	var (
