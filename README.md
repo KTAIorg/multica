@@ -230,3 +230,12 @@ An iOS mobile client lives in [`apps/mobile/`](apps/mobile/) — see its [README
 - Unless the producer has granted a written branding waiver, the Multica LOGO, product name, and copyright information may not be removed or modified in a Multica user interface. The user interface is defined by derivation — including `apps/web/`, `apps/desktop/`, `apps/mobile/`, `packages/views/`, and `packages/ui/` — and covers raw source, the frontend container image, and compiled desktop and mobile binaries (condition 1b).
 - Non-interface use (running only the `server/` backend, the daemon, or the CLI) is exempt from the branding condition, but must retain the source and [NOTICE](NOTICE) attribution and state that the product is built on Multica, with a link back to this repository (condition 1c).
 - A branding waiver and a commercial license are separate grants; neither implies the other (condition 1d).
+
+## KT Fork (KTAIorg)
+
+- `upstream` = https://github.com/multica-ai/multica (read-only)
+- `origin` = https://github.com/KTAIorg/multica
+- Baseline: upstream `main` + PR [#5792](https://github.com/multica-ai/multica/pull/5792) (generic OIDC)
+- KT whitelist customization: `OIDC_TRUSTED_ISSUERS_WITHOUT_EMAIL` + JIT user create for trusted IdP (kt-identity / Telegram without email)
+- Sync: prefer upstream release tags; security fixes immediately; at least quarterly
+- Images: `ghcr.io/ktaiorg/multica-backend`, `ghcr.io/ktaiorg/multica-web`
