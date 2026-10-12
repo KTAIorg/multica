@@ -1,0 +1,63 @@
+# Action baseline 2026-10-12: docker/login-action v4.6.0, docker/setup-buildx-action v4.4.1
+# Manual copy of an existing GHCR tag onto oci.ktyun.cc. Does not build or write GitOps.
+name: Ops · Mirror running tag
+run-name: Ops | mirror ${{ inputs.source }}:${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full ghcr.io image without tag
+        required: true
+        type: string
+      tag:
+        description: Existing image tag to copy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+
+jobs:
+  mirror:
+    name: mirror-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to oci.ktyun.cc
+        env:
+          AUDIENCE: zot
+        run: |
+          set -euo pipefail
+          token="$(curl -sS --fail --retry 3 \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+            | jq -er '.value')"
+          echo "::add-mask::${token}"
+          printf '%s' "$token" | docker login oci.ktyun.cc --username zot --password-stdin
+
+      - name: Copy tag with imagetools
+        env:
+          SOURCE: ${{ inputs.source }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SOURCE" | grep -Eq '^ghcr\.io/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$'
+          printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+          source_lc="$(printf '%s' "$SOURCE" | tr '[:upper:]' '[:lower:]')"
+          dest="oci.ktyun.cc/${source_lc#ghcr.io/}"
+          BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker buildx imagetools create \
+            --tag "${dest}:${TAG}" \
+            "${source_lc}:${TAG}"
