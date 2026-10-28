@@ -65,7 +65,7 @@
     "@multica/core": "workspace:*",
     "@multica/ui": "workspace:*",
     "@tanstack/react-virtual": "catalog:",
-    "@tiptap/core": "3.30.5",
+    "@tiptap/core": "3.27.1",
     "@tiptap/extension-code-block-lowlight": "3.27.1",
     "@tiptap/extension-document": "3.27.1",
     "@tiptap/extension-highlight": "3.27.1",
@@ -126,10 +126,11 @@
     "@testing-library/user-event": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "@vitejs/plugin-react": "catalog:",
+    "@vitejs/plugin-react": "5.2.0",
     "eslint-plugin-i18next": "catalog:",
     "jsdom": "catalog:",
     "typescript": "catalog:",
+    "vite": "7.3.5",
     "vitest": "catalog:"
   }
 }
